@@ -1,0 +1,389 @@
+---
+title: "Loan default prediction and Investment strategies"
+date: "10/22/2021"
+output: html_document
+---
+
+
+Importing libraries
+```{r}
+Pack <- c("tidyverse", "lubridate", "magrittr", "ggplotgui", "pROC", "dplyr", "ggplot2", "broom", "rpart", "C50", "ranger", "randomForest", "caret", "lift", "ROCR", "xgboost", "glmnet")
+library(tidyverse)
+library(lubridate)
+library(magrittr)
+library(ggplotgui)
+library(pROC)
+library(dplyr)
+library(ranger)
+library(ggplot2)
+library(broom)
+library(rpart)
+library(C50)
+library(randomForest)
+library(caret)
+library(lift)
+library(ROCR)
+library(glmnet)
+library(xgboost)
+```
+What is the proportion of defaults (‘charged off’ vs ‘fully paid’ loans) in the data? 
+```{r}
+dfloans <- read.csv('lcData100K.csv')
+  dfgrade<-dfloans %>% group_by(loan_status, grade,sub_grade) %>% tally()
+  Dfcharged_off<-filter(dfloans,dfloans$loan_status=="Charged Off")
+  dfgrade<-dfcharged_off %>% group_by(loan_status, grade,sub_grade) %>% tally()
+```
+The defaults are divided as follows: The share of Fully Paid loans is 97.5% and the share of Charged Off loans is 2.5%
+```{r}
+  tablepie<-sqldf("select loan_status, sum(count) as count from dataset5 group by loan_status")
+  piepercent<- round(100*tablepie$count/sum(tablepie$count), 1)
+  pie(piepercent, labels = piepercent, main = "Proportion of Fully Paid v/s Charged Off loans")
+  legend("bottomright",legend=tablepie$loan_status,bty="n",fill=colors())
+```
+How does default rate vary with loan grade?
+```{r}
+p<-ggplot(data=table1, aes(x=grade, y=dfprop)) + geom_bar(stat="identity")
+```
+Does it vary with sub-grade?
+```{r}
+p<-ggplot(data=table1, aes(x=sub_grade, y=dfprop)) + geom_bar(stat="identity")
+```
+How many loans are there in each grade? 
+```{r}
+loan_amt<-dfloans %>% group_by(grade) %>% summarise(sum(loan_amnt))
+  ggplot(data=dataset5, aes(x=grade, y=sum_loan_amnt)) + geom_bar(stat="identity")
+```
+do loan amounts vary by grade? 
+```{r}
+dataset5<-sqldf("Select purpose, count(loan_amnt),avg(loan_amnt),grade,loan_status from dfloans group by purpose")
+ggplot(data=dataset5, aes(x=grade, y=mean_loan_amnt)) + geom_bar(stat="identity")
+ggplot(data=dataset5, aes(x=grade, y=sum_loan_amnt)) + geom_bar(stat="identity")
+```
+Does interest rate for loans vary with grade, subgrade? 
+```{r}
+dataset2<- sqldf("Select grade, sub_grade ,avg(int_rate) as Mean_int_rate from dfloans group by grade, sub_grade order by grade, sub_grade")
+ggplot(data=dataset2, aes(x=grade, y=Mean_int_rate)) + geom_bar(stat="identity")
+ggplot(data=dataset2, aes(x=sub_grade, y=Mean_int_rate)) + geom_bar(stat="identity")
+```
+average, standard-deviation, min and max of interest rate by grade and subgrade
+```{r}
+avg_int_rate_by_grade<-dfloans %>% group_by(grade) %>% summarise(mean(int_rate))
+avg_int_rate_by_subgrade<-dfloans %>% group_by(sub_grade) %>% summarise(mean(int_rate)) 
+sd_by_grade<-dfloans %>% group_by(grade) %>% summarise(sd(int_rate))
+sd_by_subgrade<-dfloans %>% group_by(sub_grade) %>% summarise(sd(int_rate))
+min_by_grade<-dfloans %>% group_by(grade) %>% summarise(min(int_rate))
+min_by_subgrade<-dfloans %>% group_by(sub_grade) %>% summarise(min(int_rate))
+max_by_grade<-dfloans %>% group_by(grade) %>% summarise(max(int_rate))
+max_by_subgrade<-dfloans %>% group_by(sub_grade) %>% summarise(max(int_rate))
+```
+For loans which are fully paid back, how does the time-to-full-payoff vary?
+```{r}
+convertdate<-dfloans$last_pymnt_d<-paste(dfloans$last_pymnt_d, "-01", sep = "")
+converted_date<-dfloans$last_pymnt_d<-parse_date_time(dfloans$last_pymnt_d,  "myd")
+actual_term<-as.duration(dfloans$issue_d  %--% dfloans$last_pymnt_d)
+table_time_forpayoff<-data.frame(dfloans$grade,dfloans$loan_status,dfloans$issue_d,converted_date,actual_term)
+tablefullypaid<-filter(table_time_forpayoff,dfloans.loan_status=="Fully Paid")
+```
+How does this actual-term vary by loan grade
+```{r}
+options(scipen=999)
+boxplot(tablefullypaid$actual_term ~ tablefullypaid$dfloans.grade, data = tablefullypaid, xlab = " Grade",ylab = "Actual Term", main = "Actual Term v/s Grade")
+```
+Annual Return
+```{r}
+dfloans$actualTerm <- ifelse(dfloans$loan_status=="Fully Paid", as.duration(dfloans$issue_d  %--% dfloans$last_pymnt_d)/dyears(1), 3)
+dfloans$actualReturn <- ifelse(dfloans$actualTerm>0, ((dfloans$total_pymnt -dfloans$funded_amnt)/dfloans$funded_amnt)*(1/dfloans$actualTerm)*100, 0)
+dfloans %>% select(loan_status, int_rate, funded_amnt, total_pymnt, actualTerm, actualReturn) %>%  head()
+tableReturns<-data.frame(dfloans$loan_status, dfloans$int_rate, dfloans$funded_amnt, dfloans$total_pymnt, dfloans$actualTerm, dfloans$actualReturn, dfloans$sub_grade, dfloans$grade,dfloans$int_rate)
+tableReturnsclean<-na.omit(tableReturns)
+```
+Percentage Annual Return
+```{r}
+dfloans$actualReturn <- ifelse(dfloans$actualTerm>0, ((dfloans$total_pymnt -dfloans$funded_amnt)/dfloans$funded_amnt)*(1/dfloans$actualTerm)*100, 0)
+```
+Is there any return from loans which are ‘charged off’?
+```{r}
+dfloans$return_chargedOff <- ifelse(dfloans$loan_status=="Charged Off", as.duration(dfloans$issue_d  %--% dfloans$last_pymnt_d)/dyears(1), 3)
+dfloans$actualReturn_chargedoff <- ifelse(dfloans$return_chargedOff >0, ((dfloans$total_pymnt -dfloans$funded_amnt)/dfloans$funded_amnt)*(1/dfloans$return_chargedOff )*100, 0)
+tableReturns_chargedoff<-data.frame(dfloans$loan_status, dfloans$int_rate, dfloans$funded_amnt, dfloans$total_pymnt, dfloans$return_chargedOff, dfloans$actualReturn_chargedoff, dfloans$grade)
+View(tableReturns_chargedoff)
+tablereturns_chargedoff_clean<-na.omit(tableReturns_chargedoff)
+View(tablereturns_chargedoff_clean)
+```
+How does return from charged - off loans vary by loan grade? 
+```{r}
+ggplot(data=tablereturns_chargedoff_clean, aes(x=dfloans.grade, y=dfloans.actualReturn_chargedoff)) + geom_bar(stat="identity")
+```
+Compare the average return values with the average interest_rate on loans
+```{r}
+qplot(dfloans.int_rate, dfloans.actualReturn, data = tablereturnspos, stat = 'summary', fun.y = 'mean')
+```
+How do returns vary by grade, and by sub-grade
+```{r}
+tablereturnspos<-filter(tableReturnsclean, dfloans.actualReturn>0)
+ggplot(data=tablereturnspos, aes(x=dfloans.sub_grade, y=dfloans.actualReturn)) + geom_bar(stat="identity")
+ggplot(data=tablereturnspos, aes(x=dfloans.grade, y=dfloans.actualReturn)) + geom_bar(stat="identity")
+```
+What are people borrowing money for (purpose)
+```{r}
+table5<-dfloans%>%group_by(purpose,grade)%>%tally()
+table5b<-dfloans%>%group_by(purpose,grade)%>%summarise(mean(loan_amnt))
+table5main<-data.frame(table5$purpose,table5$n,table5b$`mean(loan_amnt)`,dfloans$grade)
+dataset5<-sqldf("Select purpose, count(loan_amnt),avg(loan_amnt),grade,loan_status from dfloans group by purpose")
+```
+Do loan amounts vary by purpose
+```{r}
+ggplot(data=dataset5, aes(x=sum_loan_amnt, y=purpose)) + geom_bar(stat="identity")
+```
+Do defaults vary by purpose?
+```{r}
+sqldf("select ((select sum_loan_amnt from dataset5 where loan_status = 'Charged Off')/(select sum_loan_amnt from dataset5))*100 as defaults, purpose from dataset5")
+```
+Does loan-grade assigned by Lending Club vary by purpose?
+```{r}
+ggplot(data=dataset5, aes(x=purpose, y=grade)) + geom_bar(stat="identity")
+```
+new derived attributes that may be useful for predicting default
+```{r}
+Dfcharged_off<-filter(dfloans,dfloans$loan_status=="Charged Off")
+#1)
+  default_rate<-round(100*Dfcharged_off$count/sum(dfloans$count), 1)
+  #The default rate shows the percentage of defaulters out of the total loan borrowers.
+  
+  #2)
+  unemployed_defaulters<-nrow(subset(dfloans, emp_length=="n/a" && loan_status=='Charged Off'))
+  #The number of borrowers who are not employed and have not fully paid the loan can be used to predict whether a loan of a certain grade is likely to be charged off.
+  
+  #3)
+  dfloans$annRet <- ((dfloans$total_pymnt -dfloans$funded_amnt)/dfloans$funded_amnt)*(12/36)*100
+  #The annual returns help us look at the returns we are getting from certain loans yearly.
+```
+univariate analyses to determine which variables will be individually useful for predicting the dependent variable (loan_status)
+```{r}
+avg_credit_limit_by_grade<-dfloans %>% group_by(grade) %>% summarise(mean(tot_hi_cred_lim))
+  
+  avg_credit_limit_by_sub_grade<-dfloans %>% group_by(sub_grade) %>% summarise(mean(tot_hi_cred_lim))
+  r<- (avg_credit_limit_by_grade[1])
+  w<- (avg_credit_limit_by_grade[2])
+  barplot(unlist(w),names.arg = c("A","B","C","D","E","F","G"), ylim=c(0,250000),xlab = "Grade", ylab = "Average Credit Limit")
+  
+  
+ 
+  df<- (avg_credit_limit_by_sub_grade[1])
+  dw<- (avg_credit_limit_by_sub_grade[2])
+  barplot(unlist(dw),names.arg= c("Sub-Grade"),ylim=c(0,300000),xlab = "Sub-Grade", ylab = "Average Credit Limit")
+  
+  avg_credit_limit_by_loan_status<- dfloans %>% group_by(loan_status) %>% summarise(mean(tot_hi_cred_lim))
+  dx<- (avg_credit_limit_by_loan_status[1])
+  dt<- (avg_credit_limit_by_loan_status[2])
+  barplot(unlist(dt),names.arg = c("Charged Off", "Fully Paid"),ylim=c(0,250000),xlab = "Loan Status", ylab = "Mean Credit Limit")
+  
+  avg_credit_limit_by_purpose<- dfloans %>% group_by(purpose) %>% summarise(mean(tot_hi_cred_lim))
+  du<- (avg_credit_limit_by_purpose[1])
+  dn<- (avg_credit_limit_by_purpose[2])
+  barplot(unlist(dn),las=2,names.arg = c("Car","Credit_card","Debt consolidation", "Home improvement","House","Major Purchase","Medical", "Moving","Other","Renewable Energy","Small Business","Vacation", "Wedding"),ylim=c(0,250000),cex.names=0.5)
+```
+
+Loading the new curated dataset
+```{r}
+dtset <- read_csv("Downloads/dtset.csv")
+glimpse(dtset)
+view(dtset)
+dtset <- dtset %>% select(-c("verification_status","num_accts_ever_120_pd","num_actv_rev_tl","tax_liens"))
+dtset[sapply(dtset, is.character)] <- lapply(dtset[sapply(dtset, is.character)],as.factor)
+sapply(dtset,class)
+```
+XGBoost 
+```{r}
+fdummy<-dummyVars(~.,data=dtset %>% select(-loan_status)) 
+dxdf <- predict(fdummy, dtset)
+
+levels(dtset$loan_status)   
+dydf <- class2ind(dtset$loan_status, drop2nd = FALSE) 
+#fpdf <- dydf [ , 2] 
+codf <- dydf [ , 1]
+
+dxdfTrn <- dxdf[trnIndex,]
+codfTrn <- codf[trnIndex]
+dxdfTst <- dxdf[-trnIndex,]
+codfTst <- codf[-trnIndex]
+
+dxTrn <- xgb.DMatrix( subset(dxdfTrn, select=-c(annRet, actualTerm, actualReturn, total_pymnt)), label=codfTrn)
+dxTst <- xgb.DMatrix( subset(dxdfTst,select=-c(annRet, actualTerm, actualReturn, total_pymnt)), label=codfTst)
+
+xgbWatchlist <- list(train = dxTrn, eval = dxTst)
+
+xgbParam <- list (max_depth = 5, eta = 0.01, objective = "binary:logistic",eval_metric="error", eval_metric = "auc")
+
+xgb_lsM1 <- xgb.train( xgbParam, dxTrn, nrounds = 500, xgbWatchlist, early_stopping_rounds = 10 )
+
+
+xgb_lsM1$best_iteration # train-error:0.138071	train-auc:0.722638	eval-error:0.137100	eval-auc:0.692264 
+ 
+xpredTrg<-predict(xgb_lsM1, dxTrn) # best_iteration is used
+head(xpredTrg)
+
+xgb_lsM1
+ 
+table(pred=as.numeric(xpredTrg>0.5), act=codfTrn)
+
+xpredTst<-predict(xgb_lsM1, dxTst)
+pred_xgb_lsM1=prediction(xpredTst, dfTst$loan_status, label.ordering = c("Fully Paid","Charged Off"))
+aucPerf_xgb_lsM1=performance(pred_xgb_lsM1, "tpr", "fpr")
+plot(aucPerf_xgb_lsM1)
+abline(a=0, b= 1)
+
+xgbParam <- list (max_depth = 3, eta = 0.1, objective = "binary:logistic", eval_metric="error", eval_metric = "auc")
+
+xgb_lscv <- xgb.cv( xgbParam, dxTrn, nrounds = 500, nfold=5, early_stopping_rounds = 10 )
+
+xgb_lscv$best_iteration #train-error:0.137854+0.000317	train-auc:0.710371+0.000955	test-error:0.138214+0.001244	test-auc:0.685469+0.002394
+
+best_cvIter <- which.max(xgb_lscv$evaluation_log$test_auc_mean)
+xgb_lsbest <- xgb.train( xgbParam, dxTrn, nrounds = xgb_lscv$best_iteration )
+
+xgb.importance(model = xgb_lsbest) %>% view()
+
+xgbParam <- list (max_depth = 4, objective = "binary:logistic", eval_metric="error", eval_metric = "auc")
+xgb_lsM1 <- xgb.train( xgbParam, dxTrn, nrounds = 500, xgbWatchlist, early_stopping_rounds = 10, eta=0.01 )
+
+xgb_lsM1 <- xgb.train( xgbParam, dxTrn, nrounds = 500, xgbWatchlist, early_stopping_rounds = 10, eta=0.5 ) 
+# Best iteration [19]:
+#train-error:0.136971	train-auc:0.715195	eval-error:0.137867	eval-auc:0.689733
+
+xgbParam1<-list(objective = "binary:logistic", eval_metric="auc", eval_metric = "error")
+
+xgb_lsM1 <- xgb.train( xgbParam1, dxTrn, nrounds = 500, xgbWatchlist, 
+early_stopping_rounds = 10, eta=0.1, max_depth=6 )
+#Best iteration [9]:
+#train-auc:0.708515	train-error:0.138143	eval-auc:0.683799	eval-error:0.137100
+
+xgb_lsM1 <- xgb.train( xgbParam1, dxTrn, nrounds = 1000, xgbWatchlist, 
+early_stopping_rounds = 10, eta=0.1, max_depth=6, lambda=0.05 )
+#Best iteration [3]:
+#	train-auc:0.700059	train-error:0.137900	eval-auc:0.680727	eval-error:0.137100
+
+xgb_lsM1 <- xgb.train( xgbParam1, dxTrn, nrounds = 1000, xgbWatchlist, early_stopping_rounds = 10, eta=0.1, max_depth=6, lambda=0.05, subsample=0.7, colsample_bytree=0.5 )
+#Best iteration [3]:
+#	train-auc:0.691824	train-error:0.138157	eval-auc:0.678874	eval-error:0.137100
+
+xgb_lsM1 <- xgb.train( xgbParam1, dxTrn, nrounds = 1000, xgbWatchlist, early_stopping_rounds
+= 10, eta=0.01, max_depth=6, subsample=0.7, colsample_bytree=0.5 )
+# Best iteration [3]:
+#	train-auc:0.687282	train-error:0.138171	eval-auc:0.676830	eval-error:0.137100
+
+xgbParamGrid <- expand.grid(max_depth = c(2, 5), eta = c(0.001, 0.01, 0.1) )
+
+
+```
+Lasso Regression (glm)
+```{r}
+xD<-dfTrn %>% select(-loan_status, -actualTerm, -annRet, -actualReturn, -total_pymnt)
+yD<-dfTrn$actualReturn
+
+glmDefault_cv<- cv.glmnet(data.matrix(xD), dfTrn$loan_status, family="binomial")
+predDefSc <- predict(glmDefault_cv, data.matrix(dfTst %>% select(-loan_status, -actualTerm, -annRet, -actualReturn, -total_pymnt)), s="lambda.1se", type="class")
+glmDefault_cv$lambda.min # 0.000102728
+glmDefault_cv$lambda.1se # 0.00615838
+tidy(coef(glmDefault_cv, s = glmDefault_cv$lambda.1se))
+plot(glmDefault_cv)
+plot(glmDefault_cv$glmnet.fit, xvar="lambda")
+plot(glmDefault_cv$glmnet.fit)
+summary(glmDefault_cv)
+```
+Elastic-Net Regression (glm)
+```{r}
+glmls_cv_a2<- cv.glmnet(data.matrix(xDTrn), dfTrn$loan_status, family="binomial", alpha=0.2)
+plot(glmls_cv_a2)
+glmls_a5<- glmnet(data.matrix(xDTrn), dfTrn$loan_status, family="binomial", alpha=0.5)
+plot(glmls_a5)
+```
+Ridge Regression (glm)
+```{r}
+yTrn<-factor(if_else(dfTrn$loan_status=="Fully Paid", '1', '0') )
+xDTrn<-dfTrn%>% select(-loan_status, -actualTerm, -annRet, -actualReturn, -total_pymnt, -issue_d)
+glmls_cv_a0<- cv.glmnet(data.matrix(xDTrn), dfTrn$loan_status, family="binomial", alpha=0)
+plot(glmls_cv_a0)
+```
+Random Forest
+```{r}
+rfm <- ranger(actualReturn ~., data=subset(dfTrn, select=-c(annRet, actualTerm, loan_status)), num.trees =200, importance='permutation')
+rfPredRet_trn<- predict(rfm, dfTrn)
+sqrt(mean( (rfPredRet_trn$predictions - dfTrn$actualReturn)^2))
+#sqrt(mean( ( (predict(rfm, dfTst))$predictions - dfTst$actualReturn)^2))
+plot ( (predict(rfm, dfTst))$predictions, dfTst$actualReturn)
+plot ( (predict(rfm, dfTrn))$predictions, dfTrn$actualReturn)
+```
+Q3
+```{r}
+xpredTst<-predict(xgb_lsM1, dxTst)
+scoreTst_xgb_ls <- dfTst %>% select(grade, loan_status, actualReturn, actualTerm, int_rate) %>% mutate(score=xpredTst)
+scoreTst_xgb_ls <- scoreTst_xgb_ls %>% mutate(tile=ntile(-score, 10))
+scoreTst_xgb_ls %>% group_by(tile) %>% summarise(count=n(), avgSc=mean(score), numDefaults=sum(loan_status=="Charged Off"), 
+avgActRet=mean(actualReturn), minRet=min(actualReturn), maxRet=max(actualReturn), avgTer=mean(actualTerm), totA=sum(grade=="A"), 
+totB=sum(grade=="B" ), totC=sum(grade=="C"), totD=sum(grade=="D"), totE=sum(grade=="E"), totF=sum(grade=="F") )
+```
+Decile Performance
+```{r}
+#Performance by deciles
+predRet_Trn <- dfTrn %>% select(grade, loan_status, actualReturn, actualTerm, int_rate) %>% mutate(predRet=(predict(rfModel_Ret, dfTrn))$predictions)
+predRet_Trn <- predRet_Trn %>% mutate(tile=ntile(-predRet, 10))
+predRet_Trn %>% group_by(tile) %>% summarise(count=n(), avgpredRet=mean(predRet), numDefaults=sum(loan_status=="Charged Off"), 
+avgActRet=mean(actualReturn), minRet=min(actualReturn), maxRet=max(actualReturn), avgTer=mean(actualTerm), totA=sum(grade=="A"), totB=sum(grade=="B" ), totC=sum(grade=="C"), totD=sum(grade=="D"), totE=sum(grade=="E"), totF=sum(grade=="F") )
+```
+Loan status 
+```{r}
+#Predict loan status
+xpredTst<-predict(xgb_lsM1, dxTst)
+scoreTst_xgb_ls <- dfTst %>% select(grade, loan_status, actualReturn, actualTerm, int_rate) %>% mutate(score=xpredTst)
+scoreTst_xgb_ls <- scoreTst_xgb_ls %>% mutate(tile=ntile(-score, 10))
+scoreTst_xgb_ls %>% group_by(tile) %>% summarise(count=n(), avgSc=mean(score), numDefaults=sum(loan_status=="Charged Off"), 
+avgActRet=mean(actualReturn), minRet=min(actualReturn), maxRet=max(actualReturn), avgTer=mean(actualTerm), totA=sum(grade=="A"), 
+totB=sum(grade=="B" ), totC=sum(grade=="C"), totD=sum(grade=="D"), totE=sum(grade=="E"), totF=sum(grade=="F") )
+
+#test for above
+#codf1 <- subset(codfTst,select=-c(annRet, actualTerm, total_pymnt, actualReturn))
+predXgbRet_Tst <- dfTst %>% select(grade, loan_status, actualReturn, actualTerm, int_rate) %>% mutate( predXgbRet=predict(xgb_lsM1, subset(codfTst,select=-c(annRet, actualTerm, total_pymnt, actualReturn))) )
+predXgbRet_Tst <- predXgbRet_Tst %>% mutate(tile=ntile(-predXgbRet, 10))
+predXgbRet_Tst %>% group_by(tile) %>% summarise(count=n(), avgPredRet=mean(predXgbRet), 
+numDefaults=sum(loan_status=="Charged Off"), avgActRet=mean(actualReturn), minRet=min(actualReturn), 
+maxRet=max(actualReturn), avgTer=mean(actualTerm), totA=sum(grade=="A"), totB=sum(grade=="B" ), 
+totC=sum(grade=="C"), totD=sum(grade=="D"), totE=sum(grade=="E"), totF=sum(grade=="F") )
+
+#Consider top d deciles from M2, ranked by M1 scores
+pRetSc <- predXgbRet_Tst %>% mutate(poScore=scoreTst_xgb_ls$score)
+pRet_d <- pRetSc %>% filter(tile<=d)
+pRet_d<- pRet_d %>% mutate(tile2=ntile(-poScore, 20))
+pRet_d %>% group_by(tile2) %>% summarise(count=n(), avgPredRet=mean(predXgbRet), 
+numDefaults=sum(loan_status=="Charged Off"), avgActRet=mean(actualReturn), minRet=min(actualReturn), 
+maxRet=max(actualReturn), avgTer=mean(actualTerm), totA=sum(grade=="A"), totB=sum(grade=="B" ),
+totC=sum(grade=="C"), totD=sum(grade=="D"), totE=sum(grade=="E"), totF=sum(grade=="F") )
+
+#considering top d decile from M2
+pRet_d<- pRet_d %>% mutate(expRet=predXgbRet*poScore)
+pRet_d<- pRet_d %>% mutate(tile2=ntile(-expRet, 20))
+pRet_d %>% group_by(tile2) %>% summarise(count=n(), avgPredRet=mean(predXgbRet), 
+numDefaults=sum(loan_status=="Charged Off"), avgActRet=mean(actualReturn), minRet=min(actualReturn), 
+maxRet=max(actualReturn), avgTer=mean(actualTerm), totA=sum(grade=="A"), totB=sum(grade=="B" ), 
+totC=sum(grade=="C"), totD=sum(grade=="D"), totE=sum(grade=="E"), totF=sum(grade=="F") )
+
+#Modeling loan_statuson lower grade loans - rf (ranger)
+
+lg_dfTst<-dfTst %>% filter(grade=='C'| grade=='D'| grade== 'E'| grade== 'F'| grade== 'G')
+rf_M1_lg <- ranger(loan_status ~., data=subset(lg_dfTrn, select=-c(annRet, actualTerm, actualReturn)), num.trees =200, 
+probability=TRUE, importance='permutation') 
+lg_scoreTstRF <- lg_dfTst %>% select(grade, loan_status, actualReturn, actualTerm, int_rate) %>% 
+mutate(score=(predict(rf_M1_lg,lg_dfTst))$predictions[,"Fully Paid"])
+lg_scoreTstRF <- lg_scoreTstRF %>% mutate(tile=ntile(-score, 10))
+lg_scoreTstRF %>% group_by(tile) %>% summarise(count=n(), avgSc=mean(score), numDefaults=sum(loan_status=="Charged Off"), avgActRet=mean(actualReturn), minRet=min(actualReturn), 
+maxRet=max(actualReturn), avgTer=mean(actualTerm), totA=sum(grade=="A"), totB=sum(grade=="B" ), 
+totC=sum(grade=="C"), totD=sum(grade=="D"), totE=sum(grade=="E"), totF=sum(grade=="F"))
+```
+ntile for glmnet
+```{r}
+predRet_Trn <- predRet_Trn %>% mutate(tile=ntile(-predRet, 10))
+predRet_Trn %>% group_by(tile) %>% summarise(count=n(), avgpredRet=mean(predRet), numDefaults=sum(loan_status=="Charged Off"), 
+avgActRet=mean(actualReturn), minRet=min(actualReturn), maxRet=max(actualReturn), avgTer=mean(actualTerm), totA=sum(grade=="A"), 
+totB=sum(grade=="B" ), totC=sum(grade=="C"), totD=sum(grade=="D"), totE=sum(grade=="E"), totF=sum(grade=="F") )
+
+```
